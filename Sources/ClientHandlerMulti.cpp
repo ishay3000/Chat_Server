@@ -12,36 +12,37 @@ ClientHandlerMulti::ClientHandlerMulti(SSLSender &sender, SSLReceiver &receiver)
 void ClientHandlerMulti::Handle(SSL *sslClient) {
     bool isSuccessfulSent;
     bool isDestinationExists;
-    Message message;
 
-    // get the user's name and add it to the map of names
-    Message msgHeaderUsername = m_receiver.Receive(sslClient);
-    m_mapClients[string(msgHeaderUsername.header.source)] = sslClient;
-    printf("[+] added client <<%d>>--<<%s>>", SSL_get_fd(sslClient), msgHeaderUsername.header.source);
+    // try to register the client
+    Message msgHeaderUsername = Register(sslClient);
+    // add the name/socket to the map
+    UpdateMap(msgHeaderUsername.header.source, sslClient, ADD);
+
+//    m_mapClients[string(msgHeaderUsername.header.source)] = sslClient;
+    printf("[+] added client <<%d>>\t<<%s>>", SSL_get_fd(sslClient), msgHeaderUsername.header.source);
     ChatLogger::Log(msgHeaderUsername, LOGIN);
 
     while (true) {
-        ZeroMemory(&message, sizeof(message));
-
         // get the message
-        message = m_receiver.Receive(sslClient);
+        Message message = m_receiver.Receive(sslClient);
         Status status = message.header.status;
         if (status == ERR_FORCE_QUIT || status == QUIT){
+            // user quit
             printf("Client quit. Deleting entry [%s]", msgHeaderUsername.header.source);
             ChatLogger::Log(msgHeaderUsername, LOGOUT);
+            // remove name/socket from the map
+            UpdateMap(msgHeaderUsername.header.source, sslClient, REMOVE);
 
-            // user quit
-            int erased = m_mapClients.erase(msgHeaderUsername.header.source /*message.header.source*/);
+/*            int erased = m_mapClients.erase(msgHeaderUsername.header.source *//*message.header.source*//*);
             if (erased > 0) {
-                printf("deleted entry [%s]", msgHeaderUsername.header.source /*message.header.source*/);
+                printf("deleted entry [%s]", msgHeaderUsername.header.source *//*message.header.source*//*);
             } else {
                 printf("couldn't delete entry");
-            }
+            }*/
             break;
         }
         // check if destination exists in the map
-        isDestinationExists = (m_mapClients.count(message.header.destination) > 0);
-        if (isDestinationExists) {
+        if (IsNameExists(message.header.destination)) {
             // such user exists
             ChatLogger::Log(message);
 
@@ -54,4 +55,50 @@ void ClientHandlerMulti::Handle(SSL *sslClient) {
         }
     }
     printf("[-] Client %s closed the connection.", msgHeaderUsername.header.source);
+}
+
+Message ClientHandlerMulti::Register(SSL *ssl) {
+    Message nameMessage;
+    Header header;
+    Packet packet;
+
+    while (true){
+        nameMessage = m_receiver.Receive(ssl);
+        if  (!this->IsNameExists(nameMessage.header.source)){
+            // if name doesn't exist
+            header.status = OK;
+            header.dataSize = 0;
+            Message msg = {header ,packet};
+            // send the OK status
+            m_sender.Send(ssl, msg);
+            // return the message containing the valid name back to the handler thread
+            return nameMessage;
+        } else{
+            header.status = ERR_REGISTER;
+            header.dataSize = 0;
+            m_sender.Send(ssl, Message {header, packet});
+        }
+    }
+}
+
+bool ClientHandlerMulti::IsNameExists(const char *name) {
+    bool isDestinationExists = (m_mapClients.count(string(name)) > 0);
+    return isDestinationExists;
+}
+
+static mutex mapMutex;
+void ClientHandlerMulti::UpdateMap(const char *name, SSL *ssl, MapAction action) {
+    unique_lock<mutex> lock(mapMutex);
+
+    switch (action){
+        case ADD:
+            m_mapClients[string(name)] = ssl;
+            break;
+        case REMOVE:
+            int erased = m_mapClients.erase(name);
+/*            if (erased > 0){
+
+            }*/
+            break;
+    }
 }
